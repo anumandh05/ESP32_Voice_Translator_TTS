@@ -1,67 +1,133 @@
-from flask import Flask, request, jsonify, send_file
-import wave, io, time, os
+from flask import Flask, request, jsonify
 import speech_recognition as sr
-from deep_translator import GoogleTranslator
-from gtts import gTTS
-from flask_cors import CORS
+from googletrans import Translator
+import wave
 
 app = Flask(__name__)
-CORS(app)
 
+UPLOAD_FILE = "upload.pcm"
+WAV_FILE = "upload.wav"
+
+translator = Translator()
+
+
+# ------------------------------------------------------
+# STYLE 2 : NATURAL, SIMPLE, WHATSAPP-LIKE TANGLISH
+# ------------------------------------------------------
+def tamil_to_tanglish_style2(text):
+
+    # Base letter mapping (simple)
+    base = {
+        "அ": "a", "ஆ": "aa", "இ": "i", "ஈ": "ee",
+        "உ": "u", "ஊ": "oo", "எ": "e", "ஏ": "ae",
+        "ஐ": "ai", "ஒ": "o", "ஓ": "oo", "ஔ": "au",
+
+        "க": "ka", "ச": "sa", "ட": "da", "த": "tha", "ப": "pa",
+        "ம": "ma", "ய": "ya", "ர": "ra", "ல": "la", "வ": "va",
+        "ழ": "zha", "ள": "la", "ற": "ra",
+
+        "ங": "nga", "ஞ": "nja", "ண": "na", "ந": "na", "ன": "na",
+        "ஹ": "ha", "ஷ": "sha", "ஸ": "sa",
+
+        "ா": "a", "ி": "i", "ீ": "ee", "ு": "u", "ூ": "oo",
+        "ெ": "e", "ே": "ae", "ை": "ai", "ோ": "oo", "ௌ": "au",
+
+        "்": ""  # pulli silent
+    }
+
+    # Step 1: Basic transliteration
+    raw = ""
+    for ch in text:
+        if ch == "ம்":  # special handling
+            raw += "m"
+            continue
+        raw += base.get(ch, ch)
+
+    # Step 2: Natural simplification rules (STYLE 2)
+    simp = raw
+
+    # Convert strong sounds → soft sounds
+    simp = simp.replace("tha", "tha")     # stay same
+    simp = simp.replace("dha", "da")      # soften
+    simp = simp.replace("ee", "i")        # ee → i (optional)
+    simp = simp.replace("ae", "e")        # ae → e
+
+    # Common Tamil → Tanglish simplifications
+    simp = simp.replace("irukkenga", "irukenga")
+    simp = simp.replace("irukkinga", "irukenga")
+    simp = simp.replace("eppadi", "epdi")
+    simp = simp.replace("appadi", "apdi")
+
+    # Cleanup duplicated characters
+    while "aaa" in simp:
+        simp = simp.replace("aaa", "aa")
+    while "ooa" in simp:
+        simp = simp.replace("ooa", "oo")
+
+    return simp.strip()
+
+
+
+# ------------------------------------------------------
+# PCM → WAV Conversion
+# ------------------------------------------------------
+def pcm_to_wav(pcm_file, wav_file, channels=1, sample_rate=16000, byte_width=2):
+    with open(pcm_file, "rb") as pcm:
+        pcm_data = pcm.read()
+
+    with wave.open(wav_file, "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(byte_width)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm_data)
+
+
+
+# ------------------------------------------------------
+# UPLOAD API
+# ------------------------------------------------------
 @app.route("/upload", methods=["POST"])
-def upload():
+def upload_audio():
     try:
-        raw = request.data
-        if not raw:
-            return jsonify({"error": "no data"}), 400
+        # Save PCM file
+        with open(UPLOAD_FILE, "wb") as f:
+            f.write(request.data)
 
-        # wrap raw PCM into WAV
-        wav_buf = io.BytesIO()
-        with wave.open(wav_buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
-            wf.writeframes(raw)
-        wav_buf.seek(0)
+        # Convert raw PCM → WAV 16kHz
+        pcm_to_wav(UPLOAD_FILE, WAV_FILE)
 
-        # Speech Recognition
-        r = sr.Recognizer()
-        with sr.AudioFile(wav_buf) as source:
-            audio = r.record(source)
+        # Recognize speech
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(WAV_FILE) as source:
+            audio = recognizer.record(source)
 
         try:
-            text = r.recognize_google(audio)
-        except sr.UnknownValueError:
-            return jsonify({"error": "speech not recognized"}), 200
-        except Exception as e:
-            return jsonify({"error": f"STT error: {e}"}), 500
+            text = recognizer.recognize_google(audio)
+        except:
+            text = ""
 
-        # Translate
-        translated = GoogleTranslator(source='auto', target='ta').translate(text)
-        print(f"🎙 Detected: {text}")
-        print(f"🌍 Translated: {translated}")
+        if text.strip() == "":
+            return jsonify({"text": "", "translated": ""})
 
-        # TTS generation (Tamil)
-        tts = gTTS(translated, lang='ta')
-        tts_path = "translated_tts.mp3"
-        tts.save(tts_path)
+        # Translate English → Tamil
+        tamil = translator.translate(text, dest="ta").text
 
-        # Return both text + URL to download audio
+        # Tamil → Tanglish Style 2
+        tanglish = tamil_to_tanglish_style2(tamil)
+
         return jsonify({
             "text": text,
-            "translated": translated,
-            "audio_url": "http://YOUR_PC_IP:5000/audio"
-        }), 200
+            "translated": tanglish
+        })
 
     except Exception as e:
-        print("❌ Error:", e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)})
 
 
-@app.route("/audio", methods=["GET"])
-def audio():
-    """Serves the Tamil speech audio."""
-    return send_file("translated_tts.mp3", mimetype="audio/mpeg")
 
+# ------------------------------------------------------
+# START SERVER
+# ------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    print("\nVoice Translate Server Running on PORT 5000...\n")
+    app.run(host="0.0.0.0", port=5000, debug=False)
